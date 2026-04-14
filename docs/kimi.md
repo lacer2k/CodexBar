@@ -31,6 +31,8 @@ Choose one of two authentication methods:
 4. CodexBar will automatically find your session
 
 **Note**: Requires Full Disk Access to read browser cookies (System Settings → Privacy & Security → Full Disk Access → CodexBar).
+On Chromium-based browsers this can also require Keychain access to the browser's Safe Storage item
+(for example `Chrome Safe Storage` or `Arc Safe Storage`), which may show a macOS password/biometric prompt.
 
 ### Method 2: Manual Token Entry
 
@@ -42,7 +44,12 @@ For advanced users or when automatic import fails:
 4. Open Developer Tools (F12 or Cmd+Option+I)
 5. Go to **Application** → **Cookies**
 6. Copy the `kimi-auth` cookie value (JWT token)
-7. Paste it into the "Auth Token" field in CodexBar
+7. Paste it into the field in CodexBar as either:
+   - the raw `kimi-auth` JWT token, or
+   - a cookie header/value such as `kimi-auth=...`
+
+Manual mode is the most reliable workaround when automatic browser import keeps triggering browser Safe Storage
+prompts. Because CodexBar uses the pasted token directly, it does not need to read the browser's Keychain item.
 
 ### Method 3: Environment Variable
 
@@ -113,6 +120,8 @@ All tiers have a rate limit of 200 requests per 5 hours.
 ### "Kimi auth token is invalid or expired"
 - Your token has expired. Paste a new token from your browser
 - If using Automatic mode, log in to Kimi again in your browser
+- If browser import is working but macOS keeps prompting for browser Keychain access, switch to Manual mode and paste
+  the current `kimi-auth` token directly
 
 ### "No Kimi session cookies found"
 - You're not logged in to Kimi in any supported browser
