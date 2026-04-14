@@ -1,0 +1,50 @@
+name: Build macOS Artifact
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "codex/**"
+
+jobs:
+  package-macos-app:
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Select Xcode 26.1.1 (if present) or fallback to default
+        run: |
+          set -euo pipefail
+          for candidate in /Applications/Xcode_26.1.1.app /Applications/Xcode_26.1.app /Applications/Xcode.app; do
+            if [[ -d "$candidate" ]]; then
+              sudo xcode-select -s "${candidate}/Contents/Developer"
+              echo "DEVELOPER_DIR=${candidate}/Contents/Developer" >> "$GITHUB_ENV"
+              break
+            fi
+          done
+          /usr/bin/xcodebuild -version
+          swift --version
+
+      - name: Package CodexBar.app
+        env:
+          CODEXBAR_SIGNING: adhoc
+        run: |
+          set -euo pipefail
+          ./Scripts/package_app.sh
+          test -d CodexBar.app
+
+      - name: Archive app bundle
+        id: archive
+        run: |
+          set -euo pipefail
+          ARTIFACT="CodexBar-${GITHUB_SHA::12}-macOS.zip"
+          ditto -c -k --sequesterRsrc --keepParent CodexBar.app "$ARTIFACT"
+          echo "artifact=$ARTIFACT" >> "$GITHUB_OUTPUT"
+
+      - name: Upload app artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: codexbar-macos-app
+          path: ${{ steps.archive.outputs.artifact }}
+          if-no-files-found: error
