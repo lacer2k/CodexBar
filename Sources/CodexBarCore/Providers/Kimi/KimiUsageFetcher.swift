@@ -8,8 +8,13 @@ public struct KimiUsageFetcher: Sendable {
     private static let log = CodexBarLog.logger(LogCategories.kimiAPI)
     private static let usageURL =
         URL(string: "https://www.kimi.com/apiv2/kimi.gateway.billing.v1.BillingService/GetUsages")!
+    @TaskLocal static var fetchUsageOverride: (@Sendable (String, Date) async throws -> KimiUsageSnapshot)?
 
     public static func fetchUsage(authToken: String, now: Date = Date()) async throws -> KimiUsageSnapshot {
+        if let override = self.fetchUsageOverride {
+            return try await override(authToken, now)
+        }
+
         // Decode JWT to get session info
         let sessionInfo = self.decodeSessionInfo(from: authToken)
 

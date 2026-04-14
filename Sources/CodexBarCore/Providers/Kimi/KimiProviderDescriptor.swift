@@ -42,6 +42,17 @@ public enum KimiProviderDescriptor {
 }
 
 struct KimiWebFetchStrategy: ProviderFetchStrategy {
+    private enum AuthTokenSource {
+        case override
+        case browser
+        case environment
+    }
+
+    private struct ResolvedAuthToken {
+        let value: KimiCookieOverride
+        let source: AuthTokenSource
+    }
+
     let id: String = "kimi.web"
     let kind: ProviderFetchKind = .web
     private static let log = CodexBarLog.logger(LogCategories.kimiWeb)
@@ -57,7 +68,7 @@ struct KimiWebFetchStrategy: ProviderFetchStrategy {
 
         #if os(macOS)
         if context.settings?.kimi?.cookieSource != .off {
-            return KimiCookieImporter.hasSession()
+            return KimiCookieImporter.hasSession(browserDetection: context.browserDetection)
         }
         #endif
 
@@ -65,14 +76,28 @@ struct KimiWebFetchStrategy: ProviderFetchStrategy {
     }
 
     func fetch(_ context: ProviderFetchContext) async throws -> ProviderFetchResult {
-        guard let token = self.resolveToken(context: context) else {
+        let tokens = self.resolveTokens(context: context)
+        guard !tokens.isEmpty else {
             throw KimiAPIError.missingToken
         }
 
-        let snapshot = try await KimiUsageFetcher.fetchUsage(authToken: token)
-        return self.makeResult(
-            usage: snapshot.toUsageSnapshot(),
-            sourceLabel: "web")
+        var sawInvalidToken = false
+        for resolvedToken in tokens {
+            do {
+                let snapshot = try await KimiUsageFetcher.fetchUsage(authToken: resolvedToken.value.token)
+                return self.makeResult(
+                    usage: snapshot.toUsageSnapshot(),
+                    sourceLabel: "web")
+            } catch KimiAPIError.invalidToken {
+                sawInvalidToken = true
+                continue
+            }
+        }
+
+        if sawInvalidToken {
+            throw KimiAPIError.invalidToken
+        }
+        throw KimiAPIError.missingToken
     }
 
     func shouldFallback(on error: Error, context: ProviderFetchContext) -> Bool {
@@ -81,20 +106,23 @@ struct KimiWebFetchStrategy: ProviderFetchStrategy {
         return true
     }
 
-    private func resolveToken(context: ProviderFetchContext) -> String? {
+    private func resolveTokens(context: ProviderFetchContext) -> [ResolvedAuthToken] {
+        var tokens: [ResolvedAuthToken] = []
+
         // Check manual cookie first (highest priority when set)
         if let override = KimiCookieHeader.resolveCookieOverride(context: context) {
-            return override.token
+            tokens.append(ResolvedAuthToken(value: override, source: .override))
         }
 
         // Try browser cookie import when auto mode is enabled
         #if os(macOS)
         if context.settings?.kimi?.cookieSource != .off {
             do {
-                let session = try KimiCookieImporter.importSession()
-                if let token = session.authToken {
-                    return token
-                }
+                let sessions = try KimiCookieImporter.importSessions(browserDetection: context.browserDetection)
+                tokens.append(contentsOf: sessions.compactMap { session in
+                    guard let token = session.authToken else { return nil }
+                    return ResolvedAuthToken(value: KimiCookieOverride(token: token), source: .browser)
+                })
             } catch {
                 // No browser cookies found
             }
@@ -103,9 +131,21 @@ struct KimiWebFetchStrategy: ProviderFetchStrategy {
 
         // Fall back to environment
         if let override = Self.resolveToken(environment: context.env) {
-            return override
+            tokens.append(ResolvedAuthToken(value: KimiCookieOverride(token: override), source: .environment))
         }
-        return nil
+
+        return self.deduplicatedTokens(tokens)
+    }
+
+    private func deduplicatedTokens(_ tokens: [ResolvedAuthToken]) -> [ResolvedAuthToken] {
+        var deduplicated: [ResolvedAuthToken] = []
+        for token in tokens {
+            if deduplicated.contains(where: { $0.value.token == token.value.token }) {
+                continue
+            }
+            deduplicated.append(token)
+        }
+        return deduplicated
     }
 
     private static func resolveToken(environment: [String: String]) -> String? {

@@ -309,3 +309,172 @@ struct KimiAPIErrorTests {
         #expect(KimiAPIError.parseFailed("Invalid JSON").errorDescription?.contains("Invalid JSON") == true)
     }
 }
+
+@Suite(.serialized)
+struct KimiWebFetchStrategyTests {
+    private static let now = Date(timeIntervalSince1970: 1_740_000_000)
+
+    private final class LockedArray<Element>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var values: [Element] = []
+
+        func append(_ value: Element) {
+            self.lock.lock()
+            defer { self.lock.unlock() }
+            self.values.append(value)
+        }
+
+        func snapshot() -> [Element] {
+            self.lock.lock()
+            defer { self.lock.unlock() }
+            return self.values
+        }
+    }
+
+    private struct StubClaudeFetcher: ClaudeUsageFetching {
+        func loadLatestUsage(model _: String) async throws -> ClaudeUsageSnapshot {
+            throw ClaudeUsageError.parseFailed("stub")
+        }
+
+        func debugRawProbe(model _: String) async -> String {
+            "stub"
+        }
+
+        func detectVersion() -> String? {
+            nil
+        }
+    }
+
+    private func makeContext(
+        settings: ProviderSettingsSnapshot?,
+        env: [String: String] = [:]) -> ProviderFetchContext
+    {
+        ProviderFetchContext(
+            runtime: .app,
+            sourceMode: .auto,
+            includeCredits: false,
+            webTimeout: 1,
+            webDebugDumpHTML: false,
+            verbose: false,
+            env: env,
+            settings: settings,
+            fetcher: UsageFetcher(environment: env),
+            claudeFetcher: StubClaudeFetcher(),
+            browserDetection: BrowserDetection(cacheTTL: 0))
+    }
+
+    private func stubSnapshot(now: Date = Self.now) -> KimiUsageSnapshot {
+        KimiUsageSnapshot(
+            weekly: KimiUsageDetail(
+                limit: "2048",
+                used: "375",
+                remaining: "1673",
+                resetTime: "2026-01-09T15:23:13.373329235Z"),
+            rateLimit: KimiUsageDetail(
+                limit: "200",
+                used: "20",
+                remaining: "180",
+                resetTime: "2026-01-06T15:05:24.374187075Z"),
+            updatedAt: now)
+    }
+
+    @Test
+    func `later browser session wins after earlier imported session fails auth`() async throws {
+        KimiCookieImporter.importSessionOverrideForTesting = nil
+        KimiCookieImporter.importSessionsOverrideForTesting = { _, _ in
+            let staleCookie = try #require(HTTPCookie(properties: [
+                .domain: "www.kimi.com",
+                .path: "/",
+                .name: "kimi-auth",
+                .value: "stale-browser-token",
+                .secure: "TRUE",
+            ]))
+            let liveCookie = try #require(HTTPCookie(properties: [
+                .domain: "www.kimi.com",
+                .path: "/",
+                .name: "kimi-auth",
+                .value: "live-browser-token",
+                .secure: "TRUE",
+            ]))
+            return [
+                KimiCookieImporter.SessionInfo(cookies: [staleCookie], sourceLabel: "Chrome"),
+                KimiCookieImporter.SessionInfo(cookies: [liveCookie], sourceLabel: "Arc"),
+            ]
+        }
+        defer {
+            KimiCookieImporter.importSessionsOverrideForTesting = nil
+            KimiCookieImporter.importSessionOverrideForTesting = nil
+        }
+
+        let attemptedTokens = LockedArray<String>()
+        let strategy = KimiWebFetchStrategy()
+        let settings = ProviderSettingsSnapshot.make(
+            kimi: ProviderSettingsSnapshot.KimiProviderSettings(
+                cookieSource: .auto,
+                manualCookieHeader: nil))
+        let context = self.makeContext(settings: settings)
+        let fetchOverride: @Sendable (String, Date) async throws -> KimiUsageSnapshot = { token, _ in
+            attemptedTokens.append(token)
+            if token == "stale-browser-token" {
+                throw KimiAPIError.invalidToken
+            }
+            if token == "live-browser-token" {
+                return self.stubSnapshot()
+            }
+            Issue.record("Unexpected token \(token)")
+            throw KimiAPIError.invalidToken
+        }
+
+        _ = try await KimiUsageFetcher.$fetchUsageOverride.withValue(fetchOverride, operation: {
+            try await strategy.fetch(context)
+        })
+
+        #expect(attemptedTokens.snapshot() == ["stale-browser-token", "live-browser-token"])
+    }
+
+    @Test
+    func `explicit environment token wins before browser import`() async throws {
+        KimiCookieImporter.importSessionOverrideForTesting = nil
+        KimiCookieImporter.importSessionsOverrideForTesting = { _, _ in
+            let staleCookie = try #require(HTTPCookie(properties: [
+                .domain: "www.kimi.com",
+                .path: "/",
+                .name: "kimi-auth",
+                .value: "browser-token",
+                .secure: "TRUE",
+            ]))
+            return [KimiCookieImporter.SessionInfo(cookies: [staleCookie], sourceLabel: "Safari")]
+        }
+        defer {
+            KimiCookieImporter.importSessionsOverrideForTesting = nil
+            KimiCookieImporter.importSessionOverrideForTesting = nil
+        }
+
+        let attemptedTokens = LockedArray<String>()
+        let strategy = KimiWebFetchStrategy()
+        let settings = ProviderSettingsSnapshot.make(
+            kimi: ProviderSettingsSnapshot.KimiProviderSettings(
+                cookieSource: .auto,
+                manualCookieHeader: nil))
+        let context = self.makeContext(
+            settings: settings,
+            env: ["KIMI_AUTH_TOKEN": "env-token"])
+        let fetchOverride: @Sendable (String, Date) async throws -> KimiUsageSnapshot = { token, _ in
+            attemptedTokens.append(token)
+            if token == "browser-token" {
+                throw KimiAPIError.invalidToken
+            }
+            if token == "env-token" {
+                return self.stubSnapshot()
+            }
+            Issue.record("Unexpected token \(token)")
+            throw KimiAPIError.invalidToken
+        }
+
+        _ = try await KimiUsageFetcher.$fetchUsageOverride.withValue(fetchOverride, operation: {
+            try await strategy.fetch(context)
+        })
+
+        #expect(attemptedTokens.snapshot() == ["env-token"])
+    }
+}

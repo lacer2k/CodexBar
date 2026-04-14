@@ -9,6 +9,10 @@ public enum KimiCookieImporter {
     private static let cookieDomains = ["www.kimi.com", "kimi.com"]
     private static let cookieImportOrder: BrowserCookieImportOrder =
         ProviderDefaults.metadata[.kimi]?.browserCookieOrder ?? Browser.defaultImportOrder
+    nonisolated(unsafe) static var importSessionOverrideForTesting:
+        ((BrowserDetection, ((String) -> Void)?) throws -> SessionInfo)?
+    nonisolated(unsafe) static var importSessionsOverrideForTesting:
+        ((BrowserDetection, ((String) -> Void)?) throws -> [SessionInfo])?
 
     public struct SessionInfo: Sendable {
         public let cookies: [HTTPCookie]
@@ -28,6 +32,13 @@ public enum KimiCookieImporter {
         browserDetection: BrowserDetection = BrowserDetection(),
         logger: ((String) -> Void)? = nil) throws -> [SessionInfo]
     {
+        if let override = self.importSessionsOverrideForTesting {
+            return try override(browserDetection, logger)
+        }
+        if let override = self.importSessionOverrideForTesting {
+            return [try override(browserDetection, logger)]
+        }
+
         var sessions: [SessionInfo] = []
         let candidates = self.cookieImportOrder.cookieImportCandidates(using: browserDetection)
         for browserSource in candidates {
